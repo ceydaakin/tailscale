@@ -649,6 +649,61 @@ func TestShouldProcessInbound(t *testing.T) {
 			want: false,
 		},
 
+		{
+			// A SYN-ACK replying to a kernel connection (e.g. one SNATed
+			// through this node) whose source port happens to equal the
+			// PeerAPI port must go to the kernel, not netstack. See #21835.
+			name: "peerapi-port-synack-reply-to-kernel-conn",
+			pkt: &packet.Parsed{
+				IPVersion: 4,
+				IPProto:   ipproto.TCP,
+				Src:       netip.MustParseAddrPort("100.101.102.103:443"),
+				Dst:       netip.MustParseAddrPort("100.101.102.104:5555"),
+				TCPFlags:  packet.TCPSynAck,
+			},
+			beforeStart: func(i *Impl) {
+				// As if we were running on Linux where netstack isn't used.
+				i.ProcessLocalIPs = false
+				i.ProcessSubnets = false
+			},
+			afterStart: func(i *Impl) {
+				i.atomicIsLocalIPFunc.Store(looksLikeATailscaleSelfAddress)
+				i.peerapiPort4Atomic.Store(5555)
+			},
+			want: false,
+		},
+		{
+			// Non-SYN packets of a flow netstack owns on the PeerAPI port
+			// are still handled by netstack.
+			name: "peerapi-port-ack-netstack-endpoint",
+			pkt: &packet.Parsed{
+				IPVersion: 4,
+				IPProto:   ipproto.TCP,
+				Src:       netip.MustParseAddrPort("100.101.102.103:1234"),
+				Dst:       netip.MustParseAddrPort("100.101.102.104:5555"),
+				TCPFlags:  packet.TCPAck,
+			},
+			beforeStart: func(i *Impl) {
+				i.ProcessLocalIPs = false
+				i.ProcessSubnets = false
+			},
+			afterStart: func(i *Impl) {
+				i.atomicIsLocalIPFunc.Store(looksLikeATailscaleSelfAddress)
+				i.peerapiPort4Atomic.Store(5555)
+
+				ln, err := gonet.ListenTCP(i.ipstack, tcpip.FullAddress{
+					NIC:  nicID,
+					Addr: tcpip.AddrFrom4(netip.MustParseAddr("100.101.102.104").As4()),
+					Port: 5555,
+				}, header.IPv4ProtocolNumber)
+				if err != nil {
+					t.Fatalf("ListenTCP: %v", err)
+				}
+				t.Cleanup(func() { ln.Close() })
+			},
+			want: true,
+		},
+
 		// TODO(andrew): test PeerAPI
 		// TODO(andrew): test TCP packets without the SYN flag set
 	}

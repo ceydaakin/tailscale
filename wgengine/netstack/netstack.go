@@ -1291,6 +1291,22 @@ func (ns *Impl) peerAPIPortAtomic(ip netip.Addr) *atomic.Uint32 {
 	}
 }
 
+// hasTCPEndpoint reports whether gVisor has a TCP endpoint for the
+// connection p belongs to.
+func (ns *Impl) hasTCPEndpoint(p *packet.Parsed) bool {
+	netProto := tcpip.NetworkProtocolNumber(ipv4.ProtocolNumber)
+	if p.Dst.Addr().Is6() {
+		netProto = ipv6.ProtocolNumber
+	}
+	id := stack.TransportEndpointID{
+		LocalAddress:  tcpip.AddrFromSlice(p.Dst.Addr().AsSlice()),
+		LocalPort:     p.Dst.Port(),
+		RemoteAddress: tcpip.AddrFromSlice(p.Src.Addr().AsSlice()),
+		RemotePort:    p.Src.Port(),
+	}
+	return ns.ipstack.FindTransportEndpoint(netProto, tcp.ProtocolNumber, id, nicID) != nil
+}
+
 var viaRange = tsaddr.TailscaleViaRange()
 
 // shouldProcessInbound reports whether an inbound packet (a packet from a
@@ -1305,7 +1321,8 @@ func (ns *Impl) shouldProcessInbound(p *packet.Parsed, t *tstun.Wrapper) bool {
 	if ns.lb != nil && p.IPProto == ipproto.TCP && isLocal {
 		var peerAPIPort uint16
 
-		if p.TCPFlags&packet.TCPSynAck == packet.TCPSyn {
+		isSyn := p.TCPFlags&packet.TCPSynAck == packet.TCPSyn
+		if isSyn {
 			if port, ok := ns.lb.GetPeerAPIPort(dstIP); ok {
 				peerAPIPort = port
 				ns.peerAPIPortAtomic(dstIP).Store(uint32(port))
@@ -1314,7 +1331,11 @@ func (ns *Impl) shouldProcessInbound(p *packet.Parsed, t *tstun.Wrapper) bool {
 			peerAPIPort = uint16(ns.peerAPIPortAtomic(dstIP).Load())
 		}
 		dport := p.Dst.Port()
-		if dport == peerAPIPort {
+		// A non-SYN packet to the PeerAPI port is only ours if it belongs to
+		// a connection netstack accepted. Otherwise it may be a reply to a
+		// kernel connection whose (e.g. SNATed) source port happens to equal
+		// the PeerAPI port, and must go to the kernel. See #21835.
+		if dport == peerAPIPort && (isSyn || ns.hasTCPEndpoint(p)) {
 			return true
 		}
 		// Also handle SSH connections, webserver, etc, if enabled:
