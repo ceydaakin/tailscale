@@ -349,8 +349,10 @@ func (s *userServer) run() error {
 	} else {
 		// If we were root, we should have been able to sudo or su as a specific
 		// user, but let's check just to make sure, since we never want to
-		// access shared folders as root.
-		err := s.assertNotRoot()
+		// access shared folders as root, unless the share is explicitly shared
+		// as the user we're already running as (e.g. root on OpenWrt, which
+		// ships without sudo or su).
+		err := s.assertCanRunAsSelf()
 		if err != nil {
 			return err
 		}
@@ -449,16 +451,23 @@ func (s *userServer) canSU() string {
 	return su
 }
 
-// assertNotRoot returns an error if the current user has UID 0 or if we cannot
-// determine the current user.
+// currentUser is user.Current, replaceable in tests.
+var currentUser = user.Current
+
+// assertCanRunAsSelf returns an error if we cannot determine the current user,
+// or if the current user has UID 0 and is not the user the share is shared as.
+// Running as the share's own user is what sudo -u or su would have done anyway.
 //
 // On Linux, root users will always have UID 0.
 //
 // On BSD, root users should always have UID 0.
-func (s *userServer) assertNotRoot() error {
-	u, err := user.Current()
+func (s *userServer) assertCanRunAsSelf() error {
+	u, err := currentUser()
 	if err != nil {
-		return fmt.Errorf("assertNotRoot failed to find current user: %s", err)
+		return fmt.Errorf("assertCanRunAsSelf failed to find current user: %s", err)
+	}
+	if u.Username == s.username {
+		return nil
 	}
 	if u.Uid == "0" {
 		return fmt.Errorf("%q is root", u.Name)
